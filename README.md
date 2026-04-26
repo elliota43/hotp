@@ -81,7 +81,7 @@ func ValidateLogin(userSecret []byte, userInput string) {
     window := 1
 
     // ValidateTOTP handles the constant-time comparison internally
-    isValid := otp.ValidateTOTP(userSecret, userInput, timeStep, window)
+    isValid := otp.ValidateTOTP(userSecret, userInput)
 
     if isValid {
         fmt.Println("Auth successful!")
@@ -96,12 +96,25 @@ func ValidateLogin(userSecret []byte, userInput string) {
 You can override the standard defaults for URI generation using the functional options:
 
 ```go
+// Build a Key URI with custom options
 uri := otp.BuildKeyURI(
     base32Secret,
     otp.WithIssuer("Internal VPN"),
     otp.WithAccountName("admin@corp.com"),
+    otp.WithAlgorithm(otp.AlgorithmSHA512),
     otp.WithDigits(8),      // Require 8-digit codes.
     otp.WithPeriod(15),     // Require codes to rotate every 15 seconds.
+)
+
+// Validate a passcode utilizing SHA512, an 8-digit code,
+// a 15-second rotation, and a strictly disabled drift window.
+isValid := otp.ValidateTOTP(
+    userSecret,
+    userInput,
+    otp.WithAlgorithm(otp.AlgorithmSHA512),
+    otp.WithDigits(8),
+    otp.WithPeriod(15),
+    otp.WithWindow(0),
 )
 ```
 
@@ -110,9 +123,17 @@ You can also generate codes manually if you are building an admin tool or testin
 ```go
 import "time"
 
-// Generate a TOTP for the current exact time
-code := otp.GenerateTOTP(secretBytes, 30, time.Now(), 6)
+// Generate a TOTP for the current exact time using default settings
+code := otp.GenerateTOTP(secretBytes, time.Now())
 
 // Generate an HOTP for a specific counter value
-code := otp.GenerateHOTP(secretBytes, uint64(42), 6)
+code := otp.GenerateHOTP(secretBytes, uint64(42))
+
+// Generate a TOTP with specific overrides
+code := otp.GenerateTOTP(
+    secretBytes,
+    time.Now(),
+    otp.WithAlgorithm(otp.AlgorithmSHA512),
+    otp.WithDigits(8),
+)
 ```

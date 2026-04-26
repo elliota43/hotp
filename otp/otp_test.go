@@ -28,14 +28,15 @@ func TestGenerateHOTP(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		actual := GenerateHOTP(secret, tc.counter, 6)
+		// Defaults to 6 digits
+		actual := GenerateHOTP(secret, tc.counter)
 		if actual != tc.expected {
-			t.Errorf("GenerateHOTP(secret, %d, 6) = %s; expected %s", tc.counter, actual, tc.expected)
+			t.Errorf("GenerateHOTP(secret, %d) = %s; expected %s", tc.counter, actual, tc.expected)
 		}
 	}
 }
 
-func TestGenerate(t *testing.T) {
+func TestGenerateTOTP(t *testing.T) {
 	secret := []byte("12345678901234567890")
 
 	// Note: RFC 6238 test vectors expect 8-digit outputs
@@ -54,9 +55,10 @@ func TestGenerate(t *testing.T) {
 	for _, tc := range tests {
 		testTime := time.Unix(tc.timestamp, 0)
 
-		actual := GenerateTOTP(secret, 30, testTime, 8)
+		// Explicitly override the default 6 digits to 8
+		actual := GenerateTOTP(secret, testTime, WithDigits(8))
 		if actual != tc.expected {
-			t.Errorf("GenerateTOTP(secret, 30, %d, 8) = %s; expected %s", tc.timestamp, actual, tc.expected)
+			t.Errorf("GenerateTOTP(secret, %d, WithDigits(8)) = %s; expected %s", tc.timestamp, actual, tc.expected)
 		}
 	}
 }
@@ -87,31 +89,36 @@ func TestGenerateSecret(t *testing.T) {
 
 func TestValidateTOTP(t *testing.T) {
 	secret := []byte("12345678901234567890")
-	timeStep := uint64(30)
-	window := 1
 
+	// Simulating time utilizing the default 30-second period
 	now := time.Now()
-	currentT := uint64(now.Unix()) / timeStep
+	currentT := uint64(now.Unix()) / 30
 
-	validCurrent := GenerateHOTP(secret, currentT, 6)
-	validPast := GenerateHOTP(secret, currentT-1, 6)
-	validFuture := GenerateHOTP(secret, currentT+1, 6)
-	invalidPast := GenerateHOTP(secret, currentT-2, 6)
+	validCurrent := GenerateHOTP(secret, currentT)
+	validPast := GenerateHOTP(secret, currentT-1)
+	validFuture := GenerateHOTP(secret, currentT+1)
+	invalidPast := GenerateHOTP(secret, currentT-2)
 
-	if !ValidateTOTP(secret, validCurrent, timeStep, window) {
+	// Tests using the default Window of 1
+	if !ValidateTOTP(secret, validCurrent) {
 		t.Errorf("expected current time step code to be valid")
 	}
 
-	if !ValidateTOTP(secret, validPast, timeStep, window) {
+	if !ValidateTOTP(secret, validPast) {
 		t.Errorf("expected past window code to be valid")
 	}
 
-	if !ValidateTOTP(secret, validFuture, timeStep, window) {
+	if !ValidateTOTP(secret, validFuture) {
 		t.Errorf("expected future window code to be valid")
 	}
 
-	if ValidateTOTP(secret, invalidPast, timeStep, window) {
+	if ValidateTOTP(secret, invalidPast) {
 		t.Errorf("expected code outside window to be invalid")
+	}
+
+	// Test validating an override
+	if ValidateTOTP(secret, validPast, WithWindow(0)) {
+		t.Errorf("expected past window code to be invalid with Window(0)")
 	}
 }
 
@@ -140,12 +147,17 @@ func TestBuildKeyURI(t *testing.T) {
 		t.Errorf("expected default period of 30, got %s", parsed1.Query().Get("period"))
 	}
 
+	if parsed1.Query().Get("algorithm") != "SHA1" {
+		t.Errorf("expected default algorithm SHA1, got %s", parsed1.Query().Get("algorithm"))
+	}
+
 	uri2 := BuildKeyURI(
 		secret,
 		WithAccountName("bob@example.com"),
 		WithIssuer("Acme Corp"),
 		WithDigits(8),
 		WithPeriod(15),
+		WithAlgorithm(AlgorithmSHA256),
 	)
 
 	parsed2, err := url.Parse(uri2)
@@ -163,11 +175,14 @@ func TestBuildKeyURI(t *testing.T) {
 	}
 
 	if parsed2.Query().Get("digits") != "8" {
-		t.Errorf("expected overriden 8 digits, got %s", parsed2.Query().Get("digits"))
+		t.Errorf("expected overridden 8 digits, got %s", parsed2.Query().Get("digits"))
 	}
 
 	if parsed2.Query().Get("period") != "15" {
-		t.Errorf("expected overriden 15 period, got %s", parsed2.Query().Get("period"))
+		t.Errorf("expected overridden 15 period, got %s", parsed2.Query().Get("period"))
 	}
 
+	if parsed2.Query().Get("algorithm") != "SHA256" {
+		t.Errorf("expected overridden algorithm SHA256, got %s", parsed2.Query().Get("algorithm"))
+	}
 }

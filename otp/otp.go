@@ -4,23 +4,51 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"math"
 	"net/url"
 	"strconv"
 	"time"
 )
 
+// Algorithm represents the hashing algorithm used for the HMAC computation.
+type Algorithm string
+
+const (
+	AlgorithmSHA1   Algorithm = "SHA1"
+	AlgorithmSHA256 Algorithm = "SHA256"
+	AlgorithmSHA512 Algorithm = "SHA512"
+)
+
+// Hash returns the standard library hash constructor for the given algorithm.
+// It defaults to SHA1.
+func (a Algorithm) Hash() func() hash.Hash {
+	switch a {
+	case AlgorithmSHA256:
+		return sha256.New
+	case AlgorithmSHA512:
+		return sha512.New
+	case AlgorithmSHA1:
+		fallthrough
+	default:
+		return sha1.New
+	}
+}
+
 // Config holds all configurable parameters for the OTP.
 type Config struct {
 	Issuer      string
 	AccountName string
-	Algorithm   string
+	Algorithm   Algorithm
 	Digits      int
 	Period      int
+	Window      int
 }
 
 // Option is a function that modifies the Config.
@@ -54,14 +82,38 @@ func WithPeriod(seconds int) Option {
 	}
 }
 
+// WithAlgorithm overrides the default SHA1 hashing algorithm.
+func WithAlgorithm(algo Algorithm) Option {
+	return func(c *Config) {
+		c.Algorithm = algo
+	}
+}
+
+// WithWindow sets the acceptable drift window for TOTP validation.
+// A window of 1 checks the current, previous, and next time steps.
+func WithWindow(window int) Option {
+	return func(c *Config) {
+		c.Window = window
+	}
+}
+
 // GenerateHOTP computes an HMAC-based One-Time Password (HOTP) as specified in RFC 4226.
 // It requires a shared secret, an 8-byte counter, and the desired length of the
 // returned numeric string (typically 6 or 8 digits).
-func GenerateHOTP(secret []byte, counter uint64, digits int) string {
+func GenerateHOTP(secret []byte, counter uint64, opts ...Option) string {
+	cfg := &Config{
+		Algorithm: AlgorithmSHA1,
+		Digits:    6,
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	counterBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(counterBytes, counter)
 
-	mac := hmac.New(sha1.New, secret)
+	mac := hmac.New(cfg.Algorithm.Hash(), secret)
 	mac.Write(counterBytes)
 	hash := mac.Sum(nil)
 
@@ -70,22 +122,30 @@ func GenerateHOTP(secret []byte, counter uint64, digits int) string {
 	binaryCode := binary.BigEndian.Uint32(hash[offset : offset+4])
 	binaryCode &= 0x7fffffff
 
-	modulus := uint32(math.Pow10(digits))
+	modulus := uint32(math.Pow10(cfg.Digits))
 	otp := binaryCode % modulus
 
-	format := fmt.Sprintf("%%0%dd", digits)
+	format := fmt.Sprintf("%%0%dd", cfg.Digits)
 	return fmt.Sprintf(format, otp)
 }
 
 // GenerateTOTP computes a Time-Based One-Time Password (TOTP) as specified in RFC 6238.
 // It converts the provided timestamp into a discrete time step (T) based on the
 // timeStep parameter (typically 30 seconds) and passes it to the underlying HOTP algorithm.
-func GenerateTOTP(secret []byte, timeStep uint64, t time.Time, digits int) string {
+func GenerateTOTP(secret []byte, t time.Time, opts ...Option) string {
+
+	cfg := &Config{
+		Period: 30,
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	unixTime := uint64(t.Unix())
+	T := unixTime / uint64(cfg.Period)
 
-	T := unixTime / timeStep
-
-	return GenerateHOTP(secret, T, digits)
+	return GenerateHOTP(secret, T, opts...)
 }
 
 // GenerateSecret creates a cryptographically secure, 20-byte random secret.
@@ -104,14 +164,25 @@ func GenerateSecret() (secretBytes []byte, base32Secret string, err error) {
 	return secretBytes, base32Secret, nil
 }
 
-func ValidateTOTP(secret []byte, passcode string, timeStep uint64, window int) bool {
+// ValidateTOTP checks if the provided passcode is valid for the given secret.
+// It defaults to a 30-second period and a drift window of 1, checking the
+// current, previous, and next time steps to account for network latency.
+func ValidateTOTP(secret []byte, passcode string, opts ...Option) bool {
+	cfg := &Config{
+		Period: 30,
+		Window: 1,
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	currentUnix := uint64(time.Now().Unix())
-	currentT := currentUnix / timeStep
+	currentT := currentUnix / uint64(cfg.Period)
 
-	for i := -window; i <= window; i++ {
+	for i := -cfg.Window; i <= cfg.Window; i++ {
 		stepT := currentT + uint64(i)
-
-		expectedPasscode := GenerateHOTP(secret, stepT, len(passcode))
+		expectedPasscode := GenerateHOTP(secret, stepT, opts...)
 
 		if subtle.ConstantTimeCompare([]byte(expectedPasscode), []byte(passcode)) == 1 {
 			return true
@@ -125,7 +196,7 @@ func ValidateTOTP(secret []byte, passcode string, timeStep uint64, window int) b
 // It uses safe defaults (SHA1, 6 digits, 30 seconds) which can be overriden.
 func BuildKeyURI(base32Secret string, opts ...Option) string {
 	cfg := &Config{
-		Algorithm: "SHA1",
+		Algorithm: AlgorithmSHA1,
 		Digits:    6,
 		Period:    30,
 	}
@@ -136,7 +207,7 @@ func BuildKeyURI(base32Secret string, opts ...Option) string {
 
 	v := url.Values{}
 	v.Set("secret", base32Secret)
-	v.Set("algorithm", cfg.Algorithm)
+	v.Set("algorithm", string(cfg.Algorithm))
 	v.Set("digits", strconv.Itoa(cfg.Digits))
 	v.Set("period", strconv.Itoa(cfg.Period))
 
